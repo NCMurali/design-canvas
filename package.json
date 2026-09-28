@@ -1,0 +1,51 @@
+{
+  "name": "design-canvas-mcp",
+  "version": "0.6.0",
+  "description": "Local-first MCP server: turn-based whiteboard design partner for any MCP harness",
+  "type": "module",
+  "bin": {
+    "design-canvas-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p . && vite build ui",
+    "test": "node test/smoke.mjs",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "pdfkit": "^0.20.2",
+    "pptxgenjs": "^4.0.1",
+    "ws": "^8.22.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
+    "@types/node": "^26.6.3",
+    "@types/pdfkit": "^0.17.6",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  },
+  "files": [
+    "dist",
+    "ui/dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "excalidraw",
+    "whiteboard",
+    "architecture",
+    "design"
+  ]
+}
