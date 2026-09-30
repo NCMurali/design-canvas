@@ -78,6 +78,7 @@ export function markdown(s: Session) {
   const list = (xs: string[]) => (xs.length ? xs.map((x) => `- ${x}`).join("\n") : "_none_");
   return [
     `# ${s.title}`, "", `_Design log exported ${new Date().toISOString()}_`, "",
+    ...(s.notes.length ? ["## Design notes", list(s.notes), ""] : []),
     ...outline(s).flatMap((o) => [
       `## ${o.board}`, "", "```mermaid", mermaid(o.shapes), "```", "",
       "### Components", list(o.components), "",

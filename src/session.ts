@@ -68,6 +68,8 @@ export class Session {
   /** board the user was on at their last turn end */
   active = "b1";
   chat: ChatMsg[] = [];
+  /** decisions, assumptions, open questions: what a later chat (or a compacted one) needs besides the shapes */
+  notes: string[] = [];
   turn: "user" | "ai" = "user";
   /** set once a Done turn has been handed to the agent */
   finishing = false;
@@ -97,7 +99,7 @@ export class Session {
     return {
       id: this.id, title: this.title, project: this.project, createdAt: this.createdAt, updatedAt: new Date().toISOString(),
       boards: this.boards, active: this.active, chat: this.chat, nextUser: this.nextUser, tokens: this.tokens,
-      aliases: [...this.aliasOf], aiShapes: [...this.aiShapes],
+      aliases: [...this.aliasOf], aiShapes: [...this.aiShapes], notes: this.notes,
     };
   }
 
@@ -107,6 +109,7 @@ export class Session {
     s.boards = d.boards ?? [{ id: "b1", name: "Main", elements: d.elements ?? [] }]; // pre-tabs sessions had one flat list
     s.active = d.active ?? s.boards[0].id;
     s.tokens = d.tokens ?? { in: 0, out: 0 };
+    s.notes = d.notes ?? [];
     s.aliasOf = new Map(d.aliases);
     s.idOf = new Map(d.aliases.map(([ex, a]) => [a, ex]));
     s.aiShapes = new Map(d.aiShapes);
@@ -179,6 +182,10 @@ export class Session {
     return this.boards.map((b) => ({ id: b.id, name: b.name, shapes: all.filter((s) => s.board === b.id).length }));
   }
 
+  addNotes(ns: string[]) {
+    this.notes = [...this.notes, ...ns.map((n) => n.trim()).filter(Boolean)].slice(-40); // ponytail: oldest drop off past 40
+  }
+
   recentChat(n = CHAT_WINDOW) {
     return this.chat.slice(-n);
   }
@@ -234,6 +241,7 @@ export class Session {
       changes,
       ...(full ? { canvas: shapes } : { canvas_omitted: "Unchanged apart from `changes`. Call get_canvas_snapshot if you lost track." }),
       layout_hints,
+      ...(first && this.notes.length && { notes: this.notes }),
       recent_chat: this.recentChat(first ? CHAT_WINDOW : 3),
       selected_ids: (extra.selected ?? []).map(this.alias).filter((a) => shapes.some((s) => s.id === a)),
       ...(answers.length && { answers }),
@@ -276,6 +284,8 @@ export class Session {
   }
 
   /** Resolves with the next user turn (or a mid-turn partial), or null on timeout/abort. */
+  get queued() { return this.queue.length; }
+
   nextTurn(timeoutMs: number, signal?: AbortSignal): Promise<UserTurn | Listening | null> {
     const queued = this.queue.shift();
     if (queued) { if (queued.done) this.finishing = true; return Promise.resolve(queued); }

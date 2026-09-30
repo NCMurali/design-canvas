@@ -52,6 +52,8 @@ export default function App() {
   const interjecting = useRef(false); // the AI is cutting in while the user holds the floor
   const lastPartial = useRef("");
   const hlTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [feed, setFeed] = useState<string[]>([]); // what the AI is doing this turn, newest last
+  const [waited, setWaited] = useState(0); // seconds the AI has been working
   const speech = useRef<{ text: string; i: number; along?: (i: number) => void }>({ text: "", i: 0 });
   const scenes = useRef(new Map<string, any[]>()); // elements of the tabs not on screen
   // Latest values for callbacks created once (socket + recognizer).
@@ -167,7 +169,7 @@ export default function App() {
   }, [countdown, endTurn]);
 
   const onAiTurn = useCallback(async (m: Msg) => {
-    setStatus("");
+    setStatus(""); setFeed([]);
     const board = m.board as { id: string; name: string };
     const cur = live.current.tabs;
     if (!cur.some((t) => t.id === board.id && t.name === board.name)) { // new tab, or the AI named the default one
@@ -183,6 +185,8 @@ export default function App() {
     } catch (e) {
       reply = { reqId: m.reqId, board: board.id, elements: serialize(api.current), failed: [{ id: "*", reason: String(e) }] };
     }
+    // a small picture of the result goes back, so the agent can see (and fix) what it drew
+    if (m.create?.length || m.update?.length) { try { reply.image = await exportImage(api.current, "png", 800); } catch { /* reply without it */ } }
     send(reply);
     if (m.create?.length || m.update?.length || m.del?.length) setUndo({ board: board.id, elements: before });
     const along = m.highlight?.length ? pointAlong(m.highlight, m.speech_text ?? "") : undefined;
@@ -199,8 +203,12 @@ export default function App() {
         setPhase(m.turn === "ai" ? "thinking" : "user");
         document.title = `${m.title} · Design Canvas`;
       } else if (m.type === "chat") setChat((c) => [...c, m.message]);
-      else if (m.type === "turn") { setPhase((p) => (m.turn === "ai" ? "thinking" : p === "speaking" ? p : "user")); if (m.turn === "user") setStatus(""); }
-      else if (m.type === "status") setStatus(m.text);
+      else if (m.type === "turn") { setPhase((p) => (m.turn === "ai" ? "thinking" : p === "speaking" ? p : "user")); if (m.turn === "user") { setStatus(""); setFeed([]); } }
+      else if (m.type === "status") {
+        setStatus(m.text);
+        setFeed((f) => [...f.filter((x) => x !== m.text).slice(-3), m.text]);
+        if (m.say && !live.current.toggles.mute) speak(m.text, () => {});
+      }
       else if (m.type === "highlight") { // older servers send pointing separately, just after the reply starts
         if (m.board !== live.current.active) return;
         const along = pointAlong(m.ids ?? [], speech.current.text);
@@ -275,6 +283,13 @@ export default function App() {
   }, []);
 
   useEffect(() => { if (toggles.mute) stopSpeaking(); }, [toggles.mute]);
+  useEffect(() => {
+    if (phase !== "thinking") return;
+    const t0 = Date.now();
+    setWaited(0);
+    const t = setInterval(() => setWaited(Math.round((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [phase]);
 
   // Debounced live sync so a reload mid-turn keeps what the user drew.
   const onChange = useCallback(() => {
@@ -383,7 +398,14 @@ export default function App() {
       <main>
         <div className="canvas">
           <Canvas locked={locked} onApi={onApi} onChange={onChange} initialData={initial.promise} highlight={highlight} />
-          {locked && <div className="dim"><span>{phase === "thinking" && status ? status : pill}</span></div>}
+          {locked && (
+            <div className="dim">
+              <div className="dim-box">
+                <span>{pill}{phase === "thinking" && ` · ${Math.floor(waited / 60)}:${String(waited % 60).padStart(2, "0")}`}</span>
+                {phase === "thinking" && feed.map((f, i) => <div key={f} className={`feed${i === feed.length - 1 ? " now" : ""}`}>{f}</div>)}
+              </div>
+            </div>
+          )}
         </div>
         {chatOpen && (
           <ChatPanel

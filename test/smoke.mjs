@@ -1,6 +1,6 @@
 // Server plumbing check: real MCP client over stdio + a fake browser over WebSocket. Run: npm test (after npm run build)
 import assert from "node:assert/strict";
-import { readFileSync, rmSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
@@ -21,6 +21,9 @@ const { url } = await call("start_design_session", { title: "Smoke" });
 assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/);
 assert.equal((await call("start_design_session")).already_running, true);
 assert.equal((await fetch(url)).status, 200);
+assert.equal(readFileSync(join(home, "port"), "utf8"), new URL(url).port); // for the activity hook
+const post = (body, h = { "x-design-canvas": "1" }) => fetch(`${url}/activity`, { method: "POST", headers: { "content-type": "application/json", ...h }, body: JSON.stringify(body) });
+assert.equal((await post({ session_id: "s1" }, {})).status, 403); // web pages can't send the header
 
 // A foreign origin must be refused.
 await assert.rejects(new Promise((ok, fail) => {
@@ -52,6 +55,13 @@ ws.send(JSON.stringify({ type: "user_turn", input_mode: "text", message: "add a 
 await next("turn");
 const raw = await client.callTool({ name: "wait_for_user_turn", arguments: { timeout_seconds: 5 } });
 assert.deepEqual(raw.content[1], { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" });
+// Hook activity: only from the chat driving the board (the one calling design-canvas tools), only on the AI's turn.
+await post({ session_id: "s1", tool: "mcp__design-canvas__wait_for_user_turn", text: "" });
+await post({ session_id: "other", tool: "Read", text: "Reading secret.txt" });
+await post({ session_id: "s1", tool: "Read", text: "Reading index.ts" });
+assert.equal((await next("status")).text, "Reading index.ts");
+assert.equal((await call("show_status", { text: "Let me add a cache.", say: true })).ok, true);
+assert.equal((await next("status")).say, true);
 const turn = JSON.parse(raw.content[0].text);
 assert.deepEqual(turn.selected_ids, ["u1"]);
 assert.equal(turn.image, undefined);
@@ -72,7 +82,7 @@ ws.on("message", (d) => {
   }));
   for (const f of m.create.filter((s) => s.children)) for (const e of made) if (f.children.includes(e.id)) e.frameId = f.id;
   const notes = m.create.filter((s) => s.reason).map((s) => ({ id: `${s.id}__reason`, type: "text", text: s.reason, x: 0, y: 0, width: 1, height: 1, version: 1, customData: { author: "ai", reasonFor: s.id } }));
-  ws.send(JSON.stringify({ reqId: m.reqId, board: m.board.id, elements: [...(m.board.id === "b1" ? [rect, label] : []), ...made, ...notes], failed: [] }));
+  ws.send(JSON.stringify({ reqId: m.reqId, board: m.board.id, elements: [...(m.board.id === "b1" ? [rect, label] : []), ...made, ...notes], failed: [], ...(m.create.length && { image: "iVBORw0KGgo=" }) }));
 });
 
 const r = await call("submit_ai_turn", {
@@ -82,7 +92,9 @@ const r = await call("submit_ai_turn", {
     { id: "a1", type: "arrow", start: { id: "u1" }, end: { id: "cache" } },
     { id: "bad", type: "arrow", start: { id: "nope" }, end: { id: "cache" } },
   ],
+  notes: ["Cache: Redis, write-through"],
 });
+assert.match(r.render, /board as it looks now/);
 assert.deepEqual(r.applied.created, ["cache", "a1"]);
 assert.equal(r.failed[0].id, "bad");
 assert.match(r.failed[0].reason, /does not exist/);
@@ -168,6 +180,7 @@ assert.equal(JSON.parse(readFileSync(ex.path, "utf8")).type, "excalidraw");
 
 assert.equal((await call("end_session")).ok, true);
 await assert.rejects(fetch(url));
+assert.equal(existsSync(join(home, "port")), false);
 
 // Saved on end; resumable by title words, with the AI's ids and the user's aliases intact.
 const { sessions } = await call("list_design_sessions");
@@ -178,6 +191,7 @@ const back = await call("start_design_session", { resume: "smo" });
 assert.equal(back.resumed, true);
 assert.deepEqual(back.boards.map((b) => b.name), ["Main", "Deployment", "Cluster"]);
 assert.ok(back.recent_chat.length >= 3);
+assert.deepEqual(back.notes, ["Cache: Redis, write-through"]);
 await call("end_session");
 
 const prompts = await client.listPrompts();

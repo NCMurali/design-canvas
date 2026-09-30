@@ -49,6 +49,18 @@ Or put this in JSON config (`.mcp.json` in a project, or `claude mcp add-json`):
 
 **Any other MCP host (generic stdio):** command `node`, args `["/absolute/path/to/design-canvas/dist/index.js"]`, transport `stdio`. Set `DESIGN_CANVAS_NO_OPEN=1` in `env` if you don't want the server to open a browser tab itself.
 
+### Show what the agent is doing (Claude Code)
+
+The board shows a timer while the AI works. It can also show what the AI is doing ("Reading src/index.ts", "Drawing 12 shapes…"), through a Claude Code hook. Add this to `~/.claude/settings.json`:
+
+```json
+"hooks": {
+  "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node /absolute/path/to/design-canvas/scripts/activity-hook.mjs", "timeout": 5, "async": true }] }]
+}
+```
+
+It runs in the background, so it never slows a tool call down. It does nothing when no board is open. Only the chat that drives the board appears on it; other Claude Code sessions don't.
+
 ## Starting a session
 
 Any of these work:
@@ -62,7 +74,9 @@ Any of these work:
 - **Templates**: **＋** opens a picker with a preview of each template. Pick one to start a new tab from its starter shapes; they're yours to edit. **Apply template…** on a tab that already has content asks the AI, as a normal turn, to restructure what's there toward the template. It reuses and relabels your shapes instead of starting over. On an empty tab, the starter shapes are added directly. The tab keeps the template's conventions, and the AI follows them in later turns.
 - **Diagram tabs**: one session holds several diagrams (Architecture, Request flow, Deployment, Data flow…). Use **＋** to add a tab, double-click a tab to rename it, and **×** to delete it. The agent picks a tab with `board` on `submit_ai_turn`, and a new name creates the tab.
 - **Questions**: the agent can ask up to 3 structured questions, which you answer with clickable chips or by typing. With a single one-choice question, one click answers and ends your turn.
-- **Status line**: while the agent works it can post short progress lines ("Comparing Kafka vs SQS…"). These are its own summary; MCP servers can't see a model's raw reasoning.
+- **While the AI works**: the board shows a timer and a short feed of what the AI is doing. That's its own progress lines ("Comparing Kafka vs SQS…"), plus each tool call if the hook above is installed. Before a long turn it says one sentence out loud ("Let me split that into three rows"), so you aren't left waiting in silence. MCP servers can't see a model's raw reasoning.
+- **Self-check**: after drawing, the AI gets a small picture of the board, so it can fix overlaps or crossed arrows. Boxes grow to fit their labels.
+- **Design notes**: the AI records decisions, assumptions and open questions (`notes`). They come back when you resume, including in a new chat, and after the harness compacts its context. They're also in the markdown export.
 - **Token meter**: estimated tokens for this turn and for the session, counting what the board sends to and receives from the AI (about 4 chars/token, images by size). Your harness's own usage (system prompt, other tools) isn't visible to the board; check that in the harness (`/cost` in Claude Code).
 - **Frames**: zones like VPC, region or cluster. Shapes inside a frame are reported with `in: <frame id>`.
 - **Undo AI turn**: reverts everything the AI changed last turn. The agent is told (`rejected_ai_turn`).
@@ -81,7 +95,7 @@ Any of these work:
 
 ## Saved sessions
 
-Every session is saved automatically as JSON in `~/.design-canvas/sessions/` (override the location with `DESIGN_CANVAS_HOME`). It's saved after each turn, on live canvas changes (debounced to 1 s) and at `end_session`. The file holds the canvas elements, chat, and the id mapping, so `u1` stays `u1` after a resume. The store lives with the server, not inside any one harness. So a diagram started in Claude Code can be resumed from Desktop Chat, Cursor and so on, and nothing depends on a particular host's memory feature.
+Every session is saved automatically as JSON in `~/.design-canvas/sessions/` (override the location with `DESIGN_CANVAS_HOME`). **To keep a project's diagrams with its code**, create a `.design-canvas/` folder in the project. Sessions started from that folder are then saved in `.design-canvas/sessions/`, and you can commit them, so git gives you history and diffs. It's saved after each turn, on live canvas changes (debounced to 1 s) and at `end_session`. The file holds the canvas elements, chat, and the id mapping, so `u1` stays `u1` after a resume. The store lives with the server, not inside any one harness. So a diagram started in Claude Code can be resumed from Desktop Chat, Cursor and so on, and nothing depends on a particular host's memory feature.
 
 ## How the turn loop works
 

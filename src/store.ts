@@ -1,13 +1,23 @@
 // Sessions persist as one JSON file each in a per-user folder shared by every harness,
 // so a diagram started in one host (Claude Code, Desktop, Cursor…) can be resumed in another.
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// A `.design-canvas` folder in the project instead keeps that project's sessions next to its code, and in git.
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Session } from "./session.js";
 
-export const SESSIONS_DIR = process.env.DESIGN_CANVAS_HOME
-  ? join(process.env.DESIGN_CANVAS_HOME, "sessions")
-  : join(homedir(), ".design-canvas", "sessions");
+const GLOBAL = process.env.DESIGN_CANVAS_HOME ?? join(homedir(), ".design-canvas");
+const LOCAL = join(process.cwd(), ".design-canvas");
+export const SESSIONS_DIR = join(!process.env.DESIGN_CANVAS_HOME && existsSync(LOCAL) ? LOCAL : GLOBAL, "sessions");
+
+// The activity hook (scripts/activity-hook.mjs) finds the live board through this file.
+const PORT_FILE = join(GLOBAL, "port");
+export function markLive(port: number) {
+  try { mkdirSync(GLOBAL, { recursive: true }); writeFileSync(PORT_FILE, String(port)); } catch { /* hook just shows nothing */ }
+}
+export function markClosed(port: number) {
+  try { if (readFileSync(PORT_FILE, "utf8") === String(port)) unlinkSync(PORT_FILE); } catch { /* already gone */ }
+}
 
 type Saved = ReturnType<Session["toJSON"]>;
 

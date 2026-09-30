@@ -16,6 +16,7 @@ export type Msg = { type: string; [k: string]: any };
 
 export interface Web {
   url: string;
+  port: number;
   broadcast(msg: Msg): void;
   clientCount(): number;
   /** Broadcast a message with a reqId and resolve with the first reply carrying the same reqId. */
@@ -33,9 +34,18 @@ function listen(server: Server, port: number) {
   });
 }
 
-export async function startWeb(onMessage: (msg: Msg, ws: WebSocket) => void, onConnect: (ws: WebSocket) => void): Promise<Web> {
+export async function startWeb(onMessage: (msg: Msg, ws: WebSocket) => void, onConnect: (ws: WebSocket) => void, onActivity: (a: Msg) => void = () => {}): Promise<Web> {
   const server = createServer(async (req, res) => {
     const path = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname);
+    if (req.method === "POST") {
+      // Harness hooks report the agent's tool calls here. A web page can't send the custom header without a CORS
+      // preflight, which is never granted, so other sites can't post to it.
+      if (path !== "/activity" || req.headers["x-design-canvas"] !== "1") return void res.writeHead(403).end();
+      let body = "";
+      req.on("data", (c) => { body += c; if (body.length > 4096) req.destroy(); });
+      req.on("end", () => { try { onActivity(JSON.parse(body)); } catch { /* not JSON: ignore */ } res.writeHead(204).end(); });
+      return;
+    }
     let file = resolve(join(UI_DIR, path));
     if (!file.startsWith(UI_DIR + sep) || !extname(file)) file = join(UI_DIR, "index.html");
     try {
@@ -71,6 +81,7 @@ export async function startWeb(onMessage: (msg: Msg, ws: WebSocket) => void, onC
 
   return {
     url: `http://127.0.0.1:${port}`,
+    port,
     broadcast,
     clientCount: () => [...wss.clients].filter((c) => c.readyState === WebSocket.OPEN).length,
     request(msg, timeoutMs) {

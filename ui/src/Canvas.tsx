@@ -40,6 +40,18 @@ function edge(b: Box, toward: { x: number; y: number }, gap = 6) {
   return { x: c.x + dx * t + (dx / len) * gap, y: c.y + dy * t + (dy / len) * gap };
 }
 
+// How much of a shape's box its label may use: ellipse ≈ inscribed rectangle, diamond ≈ half.
+const ROOM: Record<string, number> = { rectangle: 1, ellipse: 1.42, diamond: 2 };
+/** Grow a box until its label fits (~11px per char, 25px per line at the default font), so text never wraps letter by letter. */
+function fitLabel(type: string, label: string | undefined, b: Box): Box {
+  const k = ROOM[type];
+  if (!k || !label) return b;
+  const lines = label.split("\n");
+  const inner = Math.min(Math.max(...lines.map((l) => l.length * 11), 60), 260); // longer lines wrap at ~260px
+  const rows = lines.reduce((n, l) => n + Math.max(1, Math.ceil((l.length * 11) / inner)), 0);
+  return { ...b, width: Math.max(b.width, Math.round((inner + 20) * k)), height: Math.max(b.height, Math.round((rows * 25 + 20) * k)) };
+}
+
 /**
  * Older sessions drew reasons as separate text notes. Reasons now live in the shape's customData and show
  * in a card on selection, so fold any legacy notes into their owners.
@@ -93,7 +105,7 @@ export function applyAiTurn(api: Api, t: AiTurnMsg, opts: { author?: "ai" | "use
   for (const { s, old } of jobs) {
     if (LINEAR.has(s.type)) continue;
     const text = s.type === "text";
-    boxes.set(s.id, { x: s.x ?? 0, y: s.y ?? 0, width: s.width ?? old?.width ?? (text ? 120 : 160), height: s.height ?? old?.height ?? (text ? 25 : 80) });
+    boxes.set(s.id, fitLabel(s.type, s.label, { x: s.x ?? 0, y: s.y ?? 0, width: s.width ?? old?.width ?? (text ? 120 : 160), height: s.height ?? old?.height ?? (text ? 25 : 80) }));
   }
   const boxOf = (id: string): Box | undefined => {
     if (boxes.has(id)) return boxes.get(id);

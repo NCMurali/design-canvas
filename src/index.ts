@@ -8,7 +8,7 @@ import { z } from "zod";
 import { Session, type AIShape, type Question } from "./session.js";
 import { startWeb, openBrowser, type Web, type Msg } from "./webserver.js";
 import { excalidrawFile, markdown, mermaidDoc, needsBrowser, outPath, pdf, pptx, type Format } from "./export.js";
-import { findSession, listSessions, saveSession, SESSIONS_DIR } from "./store.js";
+import { findSession, listSessions, markClosed, markLive, saveSession, SESSIONS_DIR } from "./store.js";
 import { TEMPLATES } from "./templates.js";
 
 const log = (...a: unknown[]) => console.error("[design-canvas]", ...a);
@@ -47,6 +47,17 @@ function meter(args: unknown, result: { content: { type: string; text?: string; 
   session.tokens.in += inn; session.tokens.out += out;
   turnTokens.in += inn; turnTokens.out += out;
   web?.broadcast({ type: "tokens", turn: turnTokens, last: lastTurn, total: session.tokens });
+}
+
+// Claude Code hooks (scripts/activity-hook.mjs) report each tool call the agent makes, so the board can show
+// "Reading src/index.ts" instead of a silent spinner. Only the chat that drives this board counts: it's the one
+// calling design-canvas tools.
+let owner: string | undefined;
+function onActivity(a: Msg) {
+  if (!session || !web || typeof a.session_id !== "string") return;
+  if (String(a.tool ?? "").startsWith("mcp__design-canvas__")) owner = a.session_id;
+  if (a.session_id !== owner || session.turn !== "ai" || typeof a.text !== "string" || !a.text) return;
+  web.broadcast({ type: "status", text: a.text.slice(0, 160) });
 }
 
 function onMessage(msg: Msg) {
@@ -97,6 +108,7 @@ const INSTRUCTIONS =
   "Be a senior-engineer teammate, not a diagram generator: when given a topic, first put a sample/first-draft diagram on the board (a template helps), " +
   "then let the discussion lead: probe requirements and scale, point out risks and failure modes, compare alternatives, push back when something's off, " +
   "and draw only when it clarifies the point or the user asks. Point at shapes you're talking about with highlight_ids. " +
+  "Before a turn that takes a while, say one sentence first (show_status with say:true). Record decisions in `notes` so later chats keep the reasoning. " +
   "Diagrams are saved automatically: when the user wants to continue an earlier diagram " +
   '("continue the URL shortener design", "open my last diagram"), call list_design_sessions if needed, then start_design_session with resume.';
 
@@ -175,14 +187,15 @@ server.registerTool("start_design_session", {
   web = await startWeb(onMessage, (ws) => ws.send(JSON.stringify({
     type: "state", title: s.title, boards: s.boards, active: s.active, chat: s.chat, turn: s.turn, tokens: { turn: turnTokens, last: lastTurn, total: s.tokens },
     templates: TEMPLATES,
-  })));
+  })), onActivity);
+  markLive(web.port);
   openBrowser(web.url);
   log("session at", web.url);
   persist(true);
   const snap = s.snapshot();
   return json({
     url: web.url, id: s.id, title: s.title, resumed: !!resume, boards: s.boardList(),
-    ...(resume && { canvas: snap.shapes, layout_hints: snap.layout_hints, recent_chat: s.recentChat() }),
+    ...(resume && { canvas: snap.shapes, layout_hints: snap.layout_hints, ...(s.notes.length && { notes: s.notes }), recent_chat: s.recentChat() }),
     next: resume
       ? "Tell the user the URL, give a one-line recap of the saved diagrams, then call wait_for_user_turn."
       : "Tell the user the URL (it was opened in their browser). If they already said what to design, put a first-draft sample diagram on the board now " +
@@ -216,7 +229,8 @@ server.registerTool("wait_for_user_turn", {
   inputSchema: { timeout_seconds: z.number().min(1).max(3600).optional().describe("Default 50 (stays under common ~60s host tool timeouts)") },
 }, async ({ timeout_seconds }, extra) => {
   if (!session || !web) return fail("No session running. Call start_design_session first.");
-  if (session.turn === "ai") { session.turn = "user"; web.broadcast({ type: "turn", turn: "user" }); } // agent skipped submit: unlock the user
+  // agent skipped submit: unlock the user (unless a turn is already queued: that one is the AI's to answer now)
+  if (session.turn === "ai" && !session.queued) { session.turn = "user"; web.broadcast({ type: "turn", turn: "user" }); }
   const token = extra._meta?.progressToken;
   let n = 0;
   const beat = token === undefined ? null : setInterval(() => {
@@ -241,11 +255,12 @@ server.registerTool("show_status", {
   description:
     "While you work on your turn (reading code, weighing options, planning a diagram), show the user one short line about what you're doing, " +
     'e.g. "Comparing Kafka vs SQS for the event bus". Shown live on the board. Use it for anything taking more than a few seconds; ' +
-    "a summary of your progress, not raw reasoning. Call submit_ai_turn when done.",
-  inputSchema: { text: z.string().max(200) },
-}, async ({ text }) => {
+    "a summary of your progress, not raw reasoning. Call submit_ai_turn when done. " +
+    'say: true also speaks it: use that at the start of a turn that will take a while, e.g. "Let me split that into three rows."',
+  inputSchema: { text: z.string().max(200), say: z.boolean().optional().describe("Also speak it aloud") },
+}, async ({ text, say }) => {
   if (!session || !web) return fail("No session running.");
-  web.broadcast({ type: "status", text });
+  web.broadcast({ type: "status", text, ...(say && { say: true }) });
   return json({ ok: true });
 });
 
@@ -253,7 +268,12 @@ server.registerTool("submit_ai_turn", {
   title: "Submit AI turn",
   description:
     "Take your turn: speech_text appears in the chat and is spoken aloud; shapes are drawn on the shared canvas in a distinct AI color. " +
-    "Talk like a senior engineer at a whiteboard: conversational, 1-4 sentences. Not every turn needs shapes: after the first draft, discussing " +
+    "Talk like a senior engineer at a whiteboard: conversational, 1-4 sentences. " +
+    "If this turn will take more than a few seconds (several shapes, reading code), first call show_status with say:true and one short " +
+    "sentence on what you're about to do, so the user isn't left waiting in silence. " +
+    "After you draw, the result includes an image of the board: if shapes overlap, labels are cut off or arrows cross boxes, " +
+    "fix it right away with another submit_ai_turn (speech_text \"\") before waiting. " +
+    "notes: record key decisions, assumptions and open questions (one line each); they come back on resume and after your context is compacted. Not every turn needs shapes: after the first draft, discussing " +
     "(questions about requirements, risks, trade-offs, alternatives, pushing back) is often the better turn; draw when it clarifies or when asked. " +
     "highlight_ids: shapes you're talking about; while you speak, each one glows during the sentence that mentions it (by its label or id), " +
     "like pointing at the board, so name the shapes you point at. " +
@@ -281,6 +301,7 @@ server.registerTool("submit_ai_turn", {
     new_shapes: z.array(shape).optional(),
     update_shapes: z.array(z.object({ id: z.string(), changes: shape.partial().omit({ id: true }) })).optional(),
     delete_shape_ids: z.array(z.string()).optional(),
+    notes: z.array(z.string().max(300)).max(5).optional().describe("Decisions, assumptions or open questions worth remembering in later chats; appended to the session's design notes"),
     highlight_ids: z.array(z.string()).max(12).optional().describe("Shapes to point at while speaking"),
     interject: z.boolean().optional().describe("Cut in while the user is still talking (after status:listening); speech only"),
     questions: z.array(z.object({
@@ -290,9 +311,10 @@ server.registerTool("submit_ai_turn", {
       multi: z.boolean().optional().describe("Allow picking several options"),
     })).max(3).optional(),
   },
-}, async ({ speech_text, board, template, new_shapes = [], update_shapes = [], delete_shape_ids = [], questions, highlight_ids = [], interject }) => {
+}, async ({ speech_text, board, template, new_shapes = [], update_shapes = [], delete_shape_ids = [], questions, highlight_ids = [], interject, notes }) => {
   if (!session || !web) return fail("No session running. Call start_design_session first.");
   if (!web.clientCount()) return fail(`No browser is connected. Ask the user to open ${web.url}, then call submit_ai_turn again.`);
+  if (notes?.length) session.addNotes(notes);
   if (interject) {
     // A teammate cutting in: speech (+ pointing) only, and the user keeps their turn.
     const b = board ? session.board(board) : session.board(session.active);
@@ -315,15 +337,18 @@ server.registerTool("submit_ai_turn", {
   const chat = session.commitAiTurn(t.board.id, t.create.filter((s) => !bad.has(s.id)), t.update, reply.elements ?? [], speech_text, questions as Question[] | undefined);
   if (chat) web.broadcast({ type: "chat", message: chat });
   persist(true);
-  return json({
+  const render = typeof reply.image === "string" ? reply.image : undefined;
+  const out = json({
     ok: failed.length === 0,
     board: t.board,
     ...(t.guide && { template_guide: t.guide }),
     ...(t.example && { template_example: t.example }),
     applied: { created: t.create.map((s) => s.id).filter((id) => !bad.has(id)), updated: update_shapes.map((u) => u.id).filter((id) => !bad.has(id)), deleted: delete_shape_ids.filter((id) => !bad.has(id)) },
     failed,
+    ...(render && { render: "Attached: the board as it looks now. Fix any overlaps or crossings before waiting." }),
     next: session.finishing ? "The user pressed Done: call end_session now (after any export they asked for); don't wait for another turn." : "Call wait_for_user_turn.",
   });
+  return render ? { content: [...out.content, { type: "image" as const, data: render, mimeType: "image/png" }] } : out;
 });
 
 server.registerTool("list_templates", {
@@ -344,7 +369,7 @@ server.registerTool("get_canvas_snapshot", {
   const b = board ? session.board(board) : session.board(session.active);
   if (!b) return fail(`No tab "${board}". Tabs: ${JSON.stringify(session.boardList())}`);
   const { shapes, layout_hints } = session.snapshot(b.id);
-  return json({ title: session.title, turn: session.turn, board: { id: b.id, name: b.name }, boards: session.boardList(), canvas: shapes, layout_hints, recent_chat: session.recentChat() });
+  return json({ title: session.title, turn: session.turn, board: { id: b.id, name: b.name }, boards: session.boardList(), canvas: shapes, layout_hints, notes: session.notes, recent_chat: session.recentChat() });
 });
 
 server.registerTool("export_session", {
@@ -401,6 +426,7 @@ server.registerTool("end_session", {
 }, async () => {
   if (!session || !web) return json({ ok: true, note: "No session was running." });
   web.broadcast({ type: "session_ended" });
+  markClosed(web.port);
   persist(true);
   session.end();
   await web.close();
